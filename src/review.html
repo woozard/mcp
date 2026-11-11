@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Wooter Apparel review</title>
+  <style>
+    :root{font-family:system-ui,sans-serif;color-scheme:light dark;color:light-dark(#171717,#f5f5f5)}
+    body{margin:0;padding:18px}header{border-left:4px solid #fd545a;padding-left:12px}
+    h1{font-size:20px;margin:4px 0}h2{font-size:16px;margin:14px 0 4px}ul{padding-left:23px}
+    p,li{line-height:1.5;overflow-wrap:anywhere}.brand{font-size:13px;font-weight:800;letter-spacing:.08em}
+    button{background:#4cafe2;color:#101010;border:0;border-radius:8px;padding:10px 18px;font:inherit;font-weight:700}
+    button:not(:disabled){cursor:pointer}button:disabled{opacity:.55}button:focus-visible{outline:3px solid #fd545a}
+    #status{font-weight:600}a{color:light-dark(#005984,#73caff)}[hidden]{display:none}
+  </style>
+</head>
+<body>
+  <header><div class="brand">WOOTER APPAREL</div><h1 id="title">Review on Wooter</h1></header>
+  <main id="details"></main>
+  <button id="confirm" type="button" disabled hidden>Confirm</button>
+  <p id="status" role="status" aria-live="polite">Loading review…</p>
+  <p id="links"></p>
+  <script>
+    'use strict';
+    const names = {
+      prepare_cart_items: 'Add items to cart', prepare_quote: 'Save quote',
+      prepare_order: 'Place unpaid order', prepare_reorder: 'Place unpaid reorder',
+      prepare_design_request: 'Send design request'
+    };
+    const el = id => document.getElementById(id);
+    const button = el('confirm');
+    const details = el('details');
+    const status = el('status');
+    const links = el('links');
+    let hostOrigin = '*', nextId = 0, current, ready = false, submitting = false;
+    const pending = new Map();
+    function emit(message) { window.parent.postMessage({ jsonrpc: '2.0', ...message }, hostOrigin); }
+    function call(method, params) {
+      const id = ++nextId;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error('The host did not respond.'));
+        }, 75_000);
+        pending.set(id, { resolve, reject, timer });
+        emit({ id, method, params });
+      });
+    }
+    function add(tag, value, parent = details) {
+      const item = document.createElement(tag);
+      item.textContent = String(value);
+      parent.append(item);
+      return item;
+    }
+    function appendLink(value, label) {
+      try {
+        const url = new URL(value);
+        if (url.origin !== 'https://wooter.com' || !/^\/platform\//.test(url.pathname)) return;
+        const link = add('a', label, links);
+        link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer';
+        link.addEventListener('click', event => {
+          event.preventDefault();
+          call('ui/open-link', { url: url.href }).catch(() => {
+            status.textContent = 'Open this Wooter link from the conversation.';
+          });
+        });
+        links.append(document.createElement('br'));
+      } catch {}
+    }
+    function outcome(value) {
+      const state = value?.status ?? 'unknown';
+      const result = value?.result;
+      status.textContent = ({
+        pending: 'Nothing has been sent to Wooter yet.', expired: 'This review expired. Prepare a new review.',
+        submitting: 'Submission in progress. Check its status in chat.',
+        completed: 'Wooter confirmed the action.',
+        unknown: 'Not confirmed. Check Wooter before attempting this again.',
+        rejected: 'Review rejected. No Wooter write was attempted.'
+      })[state] ?? 'Check the action status in chat.';
+      if (result?.message) status.textContent += ' ' + result.message;
+      links.replaceChildren();
+      if (state === 'completed') {
+        appendLink(result?.url, result?.sent ? 'Design request sent. View it on Wooter' : 'View on Wooter');
+        appendLink(result?.instant_design_url, 'Open Wooter Instant Design Studio');
+      }
+    }
+    function render(meta) {
+      if (submitting) return;
+      const row = meta?.review;
+      if (!row || !Object.hasOwn(names, row.kind)) {
+        status.textContent = 'Review data is unavailable. Ask for a fresh review.';
+        return;
+      }
+      current = { id: row.action_id, proof: meta.proof };
+      const title = names[row.kind], payload = row.payload ?? {}, input = payload.input ?? {};
+      const lines = payload.items ?? input.items ?? payload.order?.items ?? payload.cart?.items ?? [];
+      el('title').textContent = title;
+      details.replaceChildren();
+      if (input.name || payload.order?.name) add('h2', input.name ?? payload.order.name);
+      if (input.team_name) add('p', 'Team: ' + input.team_name);
+      if (input.description) add('p', input.description);
+      if (input.primary_colors) add('p', 'Primary colors: ' + input.primary_colors.join(', '));
+      if (input.secondary_colors?.length) add('p', 'Secondary colors: ' + input.secondary_colors.join(', '));
+      if (input.due_date) add('p', 'Requested due date: ' + input.due_date + ' (not guaranteed)');
+      if (lines.length) {
+        const list = add('ul', '');
+        for (const line of lines) add('li', (line.name || ('SKU ' + line.sku_id)) + ' × ' + line.quantity, list);
+      }
+      const address = input.location ?? payload.order?.shipping_address;
+      if (address) {
+        add('h2', 'Shipping');
+        add('p', typeof address === 'string' ? address : [address.name, address.address_1, address.address_2,
+          address.city_name, address.state, address.zip, address.country_id && ('Country ID ' + address.country_id)].filter(Boolean).join(', '));
+      }
+      if (typeof input.is_same_design === 'boolean') add('p', input.is_same_design ? 'Use the same designs.' : 'Request new designs.');
+      if (input.notes) add('p', 'Notes: ' + input.notes);
+      const amount = payload.cart?.prices?.total ?? payload.order?.prices?.total;
+      if (Number.isFinite(amount) && row.kind !== 'prepare_cart_items') {
+        add('p', (payload.order ? 'Original order total: ' : 'Current cart estimate: ') +
+          new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(amount) + ' USD');
+      }
+      if (row.kind === 'prepare_order' || row.kind === 'prepare_reorder') add('p', 'No payment is charged. Confirm final pricing and artwork on Wooter.');
+      button.textContent = 'Confirm: ' + title;
+      button.hidden = row.status !== 'pending' || !current.proof;
+      button.disabled = button.hidden;
+      outcome(row);
+      resize();
+    }
+    function resize() {
+      if (ready) emit({ method:'ui/notifications/size-changed', params: {
+        width: document.documentElement.clientWidth, height: document.body.scrollHeight
+      } });
+    }
+    addEventListener('message', event => {
+      if (event.source !== parent || (hostOrigin !== '*' && event.origin !== hostOrigin)) return;
+      const message = event.data;
+      if (!message || message.jsonrpc !== '2.0') return;
+      const waiter = pending.get(message.id);
+      if (waiter && ('result' in message || 'error' in message)) {
+        if (hostOrigin === '*' && event.origin !== 'null') hostOrigin = event.origin;
+        pending.delete(message.id);
+        clearTimeout(waiter.timer);
+        if (message.error) waiter.reject(new Error('Host request failed.'));
+        else waiter.resolve(message.result);
+      } else if (ready && message.method === 'ui/notifications/tool-result') {
+        render(message.params?._meta);
+      }
+    });
+    button.addEventListener('click', async event => {
+      if (!event.isTrusted || button.disabled || !current?.proof) return;
+      submitting = true;
+      button.disabled = true;
+      status.textContent = 'Sending to Wooter…';
+      const ref = current;
+      current = null;
+      try {
+        const response = await call('tools/call', { name: 'submit_reviewed_action',
+          arguments: { action_id: ref.id, proof: ref.proof } });
+        if (response?.isError || !response?.structuredContent) throw new Error('Not confirmed');
+        const value = response.structuredContent;
+        outcome(value);
+        // Send only the action status back to the model, never the private card or proof.
+        call('ui/update-model-context', { structuredContent: {
+          action_id: ref.id, status: value.status, ...(value.result?.url ? { url: value.result.url } : {})
+        } }).catch(() => {});
+      } catch {
+        status.textContent = 'The result was not confirmed. Check action status in chat before retrying.';
+      } finally { button.hidden = true; resize(); }
+    });
+    if ('ResizeObserver' in window) new ResizeObserver(resize).observe(document.body);
+    call('ui/initialize', { appInfo: { name: 'Wooter Apparel', version: '1.0.0' },
+      appCapabilities: { availableDisplayModes: ['inline'] }, protocolVersion: '2026-01-26' })
+      .then(() => {
+        ready = true;
+        emit({ method: 'ui/notifications/initialized', params: {} });
+        resize();
+      })
+      .catch(() => { status.textContent = 'This host could not load the review. No action was submitted.'; });
+  </script>
+</body>
+</html>
